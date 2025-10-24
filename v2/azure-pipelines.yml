@@ -1,0 +1,171 @@
+# Azure Pipeline for V2 - GitHub Integration
+# Repository: https://github.com/Joseph-Jung/terraform
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - v2/terraform/*
+      - v2/lambda/*
+      - v2/azure-pipelines.yml
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  terraformVersion: '1.6.0'
+  workingDirectory: '$(System.DefaultWorkingDirectory)/v2/terraform'
+  projectVersion: 'v2'
+
+stages:
+  - stage: Validate
+    displayName: 'Validate Terraform V2'
+    jobs:
+      - job: ValidateTerraform
+        displayName: 'Validate and Format Check'
+        steps:
+          - checkout: self
+            displayName: 'Checkout GitHub Repository'
+
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - task: TerraformTaskV4@4
+            displayName: 'Terraform Init'
+            inputs:
+              provider: 'aws'
+              command: 'init'
+              workingDirectory: $(workingDirectory)
+              backendServiceAWS: 'AWS-ServiceConnection'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_REGION: $(AWS_REGION)
+
+          - task: TerraformTaskV4@4
+            displayName: 'Terraform Validate'
+            inputs:
+              provider: 'aws'
+              command: 'validate'
+              workingDirectory: $(workingDirectory)
+
+          - script: |
+              terraform fmt -check -recursive
+            displayName: 'Terraform Format Check'
+            workingDirectory: $(workingDirectory)
+
+  - stage: Plan
+    displayName: 'Plan Infrastructure V2'
+    dependsOn: Validate
+    condition: succeeded()
+    jobs:
+      - job: TerraformPlan
+        displayName: 'Terraform Plan'
+        steps:
+          - checkout: self
+            displayName: 'Checkout GitHub Repository'
+
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - task: TerraformTaskV4@4
+            displayName: 'Terraform Init'
+            inputs:
+              provider: 'aws'
+              command: 'init'
+              workingDirectory: $(workingDirectory)
+              backendServiceAWS: 'AWS-ServiceConnection'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_REGION: $(AWS_REGION)
+
+          - task: TerraformTaskV4@4
+            displayName: 'Terraform Plan'
+            inputs:
+              provider: 'aws'
+              command: 'plan'
+              workingDirectory: $(workingDirectory)
+              environmentServiceNameAWS: 'AWS-ServiceConnection'
+              commandOptions: '-out=tfplan'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_REGION: $(AWS_REGION)
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Terraform Plan'
+            inputs:
+              targetPath: '$(workingDirectory)/tfplan'
+              artifact: 'terraform-plan-v2'
+              publishLocation: 'pipeline'
+
+  - stage: Apply
+    displayName: 'Apply Infrastructure V2'
+    dependsOn: Plan
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployLambdaV2
+        displayName: 'Deploy Lambda Function V2'
+        environment: 'production-v2'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  displayName: 'Checkout GitHub Repository'
+
+                - task: TerraformInstaller@1
+                  displayName: 'Install Terraform'
+                  inputs:
+                    terraformVersion: $(terraformVersion)
+
+                - task: TerraformTaskV4@4
+                  displayName: 'Terraform Init'
+                  inputs:
+                    provider: 'aws'
+                    command: 'init'
+                    workingDirectory: $(workingDirectory)
+                    backendServiceAWS: 'AWS-ServiceConnection'
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    AWS_REGION: $(AWS_REGION)
+
+                - task: TerraformTaskV4@4
+                  displayName: 'Terraform Apply'
+                  inputs:
+                    provider: 'aws'
+                    command: 'apply'
+                    workingDirectory: $(workingDirectory)
+                    environmentServiceNameAWS: 'AWS-ServiceConnection'
+                    commandOptions: '-auto-approve'
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    AWS_REGION: $(AWS_REGION)
+
+                - script: |
+                    cd $(workingDirectory)
+                    echo "========================================="
+                    echo "Lambda Function V2 Deployment Complete"
+                    echo "========================================="
+                    echo ""
+                    echo "Function Name:"
+                    terraform output -raw lambda_function_name
+                    echo ""
+                    echo "Function ARN:"
+                    terraform output -raw lambda_function_arn
+                    echo ""
+                    echo "Version:"
+                    terraform output -raw lambda_version
+                    echo ""
+                    echo "========================================="
+                  displayName: 'Display Deployment Outputs'
