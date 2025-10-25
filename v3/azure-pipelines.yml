@@ -1,0 +1,227 @@
+# Azure Pipeline for Terraform AWS Lambda Deployment
+# Repository: https://github.com/Joseph-Jung/terraform
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - v3/**
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - v3/**
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - group: terraform-aws-credentials  # Variable group containing AWS credentials
+  - name: TF_VERSION
+    value: '1.6.0'
+  - name: WORKING_DIR
+    value: 'v3/terraform'
+
+stages:
+  # ========================================
+  # Stage 1: Validate and Format Check
+  # ========================================
+  - stage: Validate
+    displayName: 'Validate Terraform'
+    jobs:
+      - job: ValidateJob
+        displayName: 'Terraform Validate and Format'
+        steps:
+          - checkout: self
+            displayName: 'Checkout Repository'
+
+          - task: TerraformInstaller@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - script: |
+              cd $(WORKING_DIR)
+              terraform fmt -check -recursive
+            displayName: 'Terraform Format Check'
+            continueOnError: false
+
+          - script: |
+              cd $(WORKING_DIR)
+              terraform init -backend=false
+            displayName: 'Terraform Init (No Backend)'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_REGION: $(AWS_REGION)
+
+          - script: |
+              cd $(WORKING_DIR)
+              terraform validate
+            displayName: 'Terraform Validate'
+
+  # ========================================
+  # Stage 2: Plan
+  # ========================================
+  - stage: Plan
+    displayName: 'Terraform Plan'
+    dependsOn: Validate
+    condition: succeeded()
+    jobs:
+      - job: PlanJob
+        displayName: 'Terraform Plan'
+        steps:
+          - checkout: self
+            displayName: 'Checkout Repository'
+
+          - task: TerraformInstaller@0
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - script: |
+              cd $(WORKING_DIR)
+              terraform init
+            displayName: 'Terraform Init'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_REGION: $(AWS_REGION)
+
+          - script: |
+              cd $(WORKING_DIR)
+              terraform plan -out=tfplan -input=false
+            displayName: 'Terraform Plan'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_REGION: $(AWS_REGION)
+
+          - script: |
+              cd $(WORKING_DIR)
+              terraform show -no-color tfplan > tfplan.txt
+            displayName: 'Generate Plan Output'
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_REGION: $(AWS_REGION)
+
+          - publish: $(WORKING_DIR)/tfplan
+            artifact: terraform-plan
+            displayName: 'Publish Terraform Plan'
+
+          - publish: $(WORKING_DIR)/tfplan.txt
+            artifact: terraform-plan-output
+            displayName: 'Publish Plan Output'
+
+          - script: |
+              echo "================================"
+              echo "Terraform Plan Summary"
+              echo "================================"
+              cd $(WORKING_DIR)
+              cat tfplan.txt
+            displayName: 'Display Plan Summary'
+
+  # ========================================
+  # Stage 3: Apply (Production Deployment)
+  # ========================================
+  - stage: Apply
+    displayName: 'Deploy to AWS'
+    dependsOn: Plan
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployJob
+        displayName: 'Terraform Apply'
+        environment: 'production'  # Requires manual approval in Azure DevOps
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  displayName: 'Checkout Repository'
+
+                - task: TerraformInstaller@0
+                  displayName: 'Install Terraform'
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - download: current
+                  artifact: terraform-plan
+                  displayName: 'Download Terraform Plan'
+
+                - script: |
+                    cd $(WORKING_DIR)
+                    terraform init
+                  displayName: 'Terraform Init'
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    AWS_REGION: $(AWS_REGION)
+
+                - script: |
+                    cd $(WORKING_DIR)
+                    cp $(Pipeline.Workspace)/terraform-plan/tfplan .
+                    terraform apply -auto-approve tfplan
+                  displayName: 'Terraform Apply'
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    AWS_REGION: $(AWS_REGION)
+
+                - script: |
+                    cd $(WORKING_DIR)
+                    echo "================================"
+                    echo "Deployment Outputs"
+                    echo "================================"
+                    terraform output -json > outputs.json
+                    terraform output
+                    echo ""
+                    echo "API Endpoint:"
+                    terraform output -raw api_gateway_invoke_url
+                    echo ""
+                    echo "Test Command:"
+                    terraform output -raw test_curl_command
+                  displayName: 'Display Terraform Outputs'
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    AWS_REGION: $(AWS_REGION)
+
+                - publish: $(WORKING_DIR)/outputs.json
+                  artifact: terraform-outputs
+                  displayName: 'Publish Terraform Outputs'
+
+  # ========================================
+  # Stage 4: Test (Post-Deployment)
+  # ========================================
+  - stage: Test
+    displayName: 'Test Deployment'
+    dependsOn: Apply
+    condition: succeeded()
+    jobs:
+      - job: TestJob
+        displayName: 'Test Lambda Function'
+        steps:
+          - checkout: none
+
+          - download: current
+            artifact: terraform-outputs
+            displayName: 'Download Terraform Outputs'
+
+          - script: |
+              echo "Testing Lambda function via API Gateway..."
+              API_URL=$(cat $(Pipeline.Workspace)/terraform-outputs/outputs.json | jq -r '.api_gateway_invoke_url.value')
+              echo "API URL: $API_URL"
+              echo ""
+              echo "Testing GET /"
+              curl -s "$API_URL/" | jq .
+              echo ""
+              echo "Testing GET /hello"
+              curl -s "$API_URL/hello" | jq .
+            displayName: 'Test API Endpoints'
+            continueOnError: true

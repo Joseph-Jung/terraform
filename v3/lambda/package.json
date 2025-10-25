@@ -1,0 +1,20 @@
+{
+  "name": "hello-world-lambda",
+  "version": "1.0.0",
+  "description": "AWS Lambda function that returns Hello World",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "aws",
+    "lambda",
+    "serverless",
+    "hello-world"
+  ],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
