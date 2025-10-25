@@ -22,3 +22,10 @@ override.tf.json
 # Ignore CLI configuration files
 .terraformrc
 terraform.rc
+
+# Terraform lock file (optional - include if you want reproducible builds)
+# .terraform.lock.hcl
+
+# Lambda deployment packages
+**/lambda_function.zip
+*.zip
